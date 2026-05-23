@@ -80,14 +80,14 @@ std::wstring GetLastErrorMessage(DWORD error) {
     return message;
 }
 
-void ReportEvent(WORD type, const std::wstring& message) {
+void WriteEventLog(WORD type, const std::wstring& message) {
     HANDLE source = RegisterEventSourceW(nullptr, kServiceName);
     if (source == nullptr) {
         return;
     }
 
     LPCWSTR strings[] = {message.c_str()};
-    ReportEventW(source, type, 0, 0, nullptr, 1, 0, strings, nullptr);
+    ::ReportEventW(source, type, 0, 0, nullptr, 1, 0, strings, nullptr);
     DeregisterEventSource(source);
 }
 
@@ -192,7 +192,7 @@ bool LaunchTrayForSession(DWORD sessionId) {
             SecurityIdentification,
             TokenPrimary,
             primaryToken.put())) {
-        ReportEvent(
+        WriteEventLog(
             EVENTLOG_WARNING_TYPE,
             L"DuplicateTokenEx failed: " + GetLastErrorMessage(GetLastError()));
         return false;
@@ -231,7 +231,7 @@ bool LaunchTrayForSession(DWORD sessionId) {
     }
 
     if (!created) {
-        ReportEvent(
+        WriteEventLog(
             EVENTLOG_WARNING_TYPE,
             L"CreateProcessAsUserW failed: " + GetLastErrorMessage(GetLastError()));
         return false;
@@ -249,7 +249,7 @@ void LaunchTrayForAllSessions() {
     WTS_SESSION_INFOW* sessions = nullptr;
     DWORD sessionCount = 0;
     if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &sessionCount)) {
-        ReportEvent(
+        WriteEventLog(
             EVENTLOG_WARNING_TYPE,
             L"WTSEnumerateSessionsW failed: " + GetLastErrorMessage(GetLastError()));
         return;
@@ -356,7 +356,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
 
     const RPC_STATUS rpcStatus = StartRpcServer();
     if (rpcStatus != RPC_S_OK) {
-        ReportEvent(
+        WriteEventLog(
             EVENTLOG_ERROR_TYPE,
             L"RPC server failed to start. RPC status: " + std::to_wstring(rpcStatus));
         CloseHandle(g_rpcStoppedEvent);
@@ -381,7 +381,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
 
 }  // namespace
 
-extern "C" void StopPracService(void) {
+extern "C" void StopPracService(handle_t) {
     if (g_rpcStoppedEvent != nullptr) {
         SetEvent(g_rpcStoppedEvent);
     }

@@ -226,6 +226,7 @@ bool IsStartedByService() {
 
 bool StopServiceViaRpc() {
     RPC_WSTR stringBinding = nullptr;
+    handle_t binding = nullptr;
     RPC_STATUS status = RpcStringBindingComposeW(
         nullptr,
         reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcProtocolSequence)),
@@ -238,7 +239,7 @@ bool StopServiceViaRpc() {
         return false;
     }
 
-    status = RpcBindingFromStringBindingW(stringBinding, &PracServiceRpcBinding);
+    status = RpcBindingFromStringBindingW(stringBinding, &binding);
     RpcStringFreeW(&stringBinding);
     if (status != RPC_S_OK) {
         SetLastError(status);
@@ -246,7 +247,7 @@ bool StopServiceViaRpc() {
     }
 
     RpcTryExcept {
-        StopPracService();
+        StopPracService(binding);
         status = RPC_S_OK;
     }
     RpcExcept(1) {
@@ -254,8 +255,7 @@ bool StopServiceViaRpc() {
     }
     RpcEndExcept
 
-    RpcBindingFree(&PracServiceRpcBinding);
-    PracServiceRpcBinding = nullptr;
+    RpcBindingFree(&binding);
 
     if (status != RPC_S_OK) {
         SetLastError(status);
