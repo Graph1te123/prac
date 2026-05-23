@@ -17,6 +17,10 @@ Win32 API tray application and Windows service for Windows.
 - The tray app starts the service when it is stopped, then exits.
 - Exit commands in the tray app stop the service through Windows RPC over
   `ncalrpc`.
+- The service authenticates users and activates licenses through configurable
+  HTTPS endpoints.
+- JWT tokens and license tickets are kept only in service memory and are never
+  returned to GUI clients.
 
 ## Build
 
@@ -42,3 +46,24 @@ sc.exe start PracTrayService
 The service does not accept Stop or Shutdown controls from the Service Control
 Manager. Use the tray application's Exit command to stop it through the RPC
 interface.
+
+## Web Service Configuration
+
+The service reads HTTPS endpoint configuration from environment variables:
+
+- `PRAC_API_BASE_URL`, default `https://localhost`
+- `PRAC_AUTH_METHOD`, default `POST`
+- `PRAC_AUTH_ENDPOINT`, default `/auth/login`
+- `PRAC_REFRESH_METHOD`, default `POST`
+- `PRAC_REFRESH_ENDPOINT`, default `/auth/refresh`
+- `PRAC_LICENSE_METHOD`, default `GET`
+- `PRAC_LICENSE_ENDPOINT`, default `/license`
+- `PRAC_ACTIVATE_METHOD`, default `POST`
+- `PRAC_ACTIVATE_ENDPOINT`, default `/license/activate`
+
+The login endpoint receives JSON with `username` and `password`. The refresh
+endpoint receives `refreshToken`. The activation endpoint receives
+`activationCode`. The service accepts common response field names such as
+`accessToken` or `access_token`, `refreshToken` or `refresh_token`,
+`ticket` or `licenseTicket`, and expiration values from JWT `exp` claims or
+JSON fields such as `expiresAt` / `expiresIn`.

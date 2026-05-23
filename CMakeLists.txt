@@ -104,6 +104,7 @@ target_link_libraries(prac-service PRIVATE
     advapi32
     rpcrt4
     userenv
+    winhttp
     wtsapi32
 )
 

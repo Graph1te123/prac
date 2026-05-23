@@ -6,4 +6,24 @@
 interface PracServiceRpc
 {
     void StopPracService([in] handle_t binding);
+    unsigned long GetAuthenticatedUser(
+        [in] handle_t binding,
+        [in] unsigned long userNameCapacity,
+        [out, size_is(userNameCapacity)] wchar_t* userName,
+        [out] unsigned long* isAuthenticated);
+    unsigned long LoginUser(
+        [in] handle_t binding,
+        [in, string] wchar_t* userName,
+        [in, string] wchar_t* password);
+    unsigned long LogoutUser([in] handle_t binding);
+    unsigned long GetLicenseInfo(
+        [in] handle_t binding,
+        [in] unsigned long statusCapacity,
+        [out, size_is(statusCapacity)] wchar_t* status,
+        [out] hyper* expiresAtUnixTime,
+        [out] unsigned long* hasLicense);
+    unsigned long ActivateProduct(
+        [in] handle_t binding,
+        [in, string] wchar_t* activationCode);
+    unsigned long CheckAntivirusFeature([in] handle_t binding);
 }
