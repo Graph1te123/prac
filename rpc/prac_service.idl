@@ -1,0 +1,9 @@
+[
+    uuid(7A5F9D93-5F50-4E5C-8C02-2B750A0C7A41),
+        version(1.0),
+        pointer_default(unique)
+]
+interface PracServiceRpc
+{
+    void StopPracService();
+}
