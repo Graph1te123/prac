@@ -1,7 +1,6 @@
 #include <windows.h>
-#include <rpc.h>
-#include <userenv.h>
 #include <wtsapi32.h>
+#include <userenv.h>
 
 #include <algorithm>
 #include <mutex>
@@ -9,383 +8,419 @@
 #include <vector>
 
 #include "constants.h"
-#include "prac_service.h"
 
 namespace {
 
-struct ScopedHandle {
-    HANDLE value = nullptr;
+    struct ScopedHandle {
+        HANDLE value = nullptr;
 
-    ScopedHandle() = default;
-    explicit ScopedHandle(HANDLE handle) : value(handle) {}
-    ScopedHandle(const ScopedHandle&) = delete;
-    ScopedHandle& operator=(const ScopedHandle&) = delete;
+        ScopedHandle() = default;
 
-    ~ScopedHandle() {
-        reset();
-    }
+        explicit ScopedHandle(HANDLE handle)
+            : value(handle) {}
 
-    HANDLE get() const {
-        return value;
-    }
+        ScopedHandle(const ScopedHandle&) = delete;
+        ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-    HANDLE* put() {
-        reset();
-        return &value;
-    }
-
-    HANDLE release() {
-        HANDLE released = value;
-        value = nullptr;
-        return released;
-    }
-
-    void reset(HANDLE handle = nullptr) {
-        if (value != nullptr && value != INVALID_HANDLE_VALUE) {
-            CloseHandle(value);
+        ~ScopedHandle() {
+            reset();
         }
-        value = handle;
-    }
-};
 
-struct LaunchedProcess {
-    DWORD sessionId = 0;
-    DWORD processId = 0;
-    HANDLE process = nullptr;
-};
+        HANDLE get() const {
+            return value;
+        }
 
-SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
-SERVICE_STATUS g_serviceStatus{};
-DWORD g_checkpoint = 1;
-HANDLE g_rpcStoppedEvent = nullptr;
-std::mutex g_processesMutex;
-std::vector<LaunchedProcess> g_processes;
+        HANDLE* put() {
+            reset();
+            return &value;
+        }
 
-std::wstring GetLastErrorMessage(DWORD error) {
-    wchar_t* buffer = nullptr;
-    const DWORD size = FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+        HANDLE release() {
+            HANDLE released = value;
+            value = nullptr;
+            return released;
+        }
+
+        void reset(HANDLE handle = nullptr) {
+            if (value != nullptr && value != INVALID_HANDLE_VALUE) {
+                CloseHandle(value);
+            }
+
+            value = handle;
+        }
+    };
+
+    struct LaunchedProcess {
+        DWORD sessionId = 0;
+        DWORD processId = 0;
+        HANDLE process = nullptr;
+    };
+
+    SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
+    SERVICE_STATUS g_serviceStatus{};
+    DWORD g_checkpoint = 1;
+    HANDLE g_stopEvent = nullptr;
+
+    std::mutex g_processesMutex;
+    std::vector<LaunchedProcess> g_processes;
+
+    std::wstring GetLastErrorMessage(DWORD error) {
+        wchar_t* buffer = nullptr;
+
+        const DWORD size = FormatMessageW(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER |
+            FORMAT_MESSAGE_FROM_SYSTEM |
             FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr,
-        error,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPWSTR>(&buffer),
-        0,
-        nullptr);
+            nullptr,
+            error,
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            reinterpret_cast<LPWSTR>(&buffer),
+            0,
+            nullptr);
 
-    std::wstring message = size != 0 && buffer != nullptr ? buffer : L"Unknown error";
-    if (buffer != nullptr) {
-        LocalFree(buffer);
-    }
-    return message;
-}
+        std::wstring message =
+            size != 0 && buffer != nullptr ? buffer : L"Unknown error";
 
-void WriteEventLog(WORD type, const std::wstring& message) {
-    HANDLE source = RegisterEventSourceW(nullptr, kServiceName);
-    if (source == nullptr) {
-        return;
+        if (buffer != nullptr) {
+            LocalFree(buffer);
+        }
+
+        return message;
     }
 
-    LPCWSTR strings[] = {message.c_str()};
-    ::ReportEventW(source, type, 0, 0, nullptr, 1, 0, strings, nullptr);
-    DeregisterEventSource(source);
-}
+    void WriteEventLog(WORD type, const std::wstring& message) {
+        HANDLE source = RegisterEventSourceW(nullptr, kServiceName);
 
-void SetServiceState(DWORD state, DWORD win32ExitCode = NO_ERROR, DWORD waitHint = 0) {
-    g_serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    g_serviceStatus.dwCurrentState = state;
-    g_serviceStatus.dwWin32ExitCode = win32ExitCode;
-    g_serviceStatus.dwWaitHint = waitHint;
+        if (source == nullptr) {
+            return;
+        }
 
-    if (state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING) {
-        g_serviceStatus.dwControlsAccepted = 0;
-        g_serviceStatus.dwCheckPoint = g_checkpoint++;
-    } else {
-        g_serviceStatus.dwControlsAccepted =
-            state == SERVICE_RUNNING ? SERVICE_ACCEPT_SESSIONCHANGE : 0;
-        g_serviceStatus.dwCheckPoint = 0;
+        LPCWSTR strings[] = { message.c_str() };
+
+        ReportEventW(
+            source,
+            type,
+            0,
+            0,
+            nullptr,
+            1,
+            0,
+            strings,
+            nullptr);
+
+        DeregisterEventSource(source);
     }
 
-    if (g_serviceStatusHandle != nullptr) {
-        SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+    void SetServiceState(DWORD state, DWORD win32ExitCode = NO_ERROR, DWORD waitHint = 0) {
+        g_serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+        g_serviceStatus.dwCurrentState = state;
+        g_serviceStatus.dwWin32ExitCode = win32ExitCode;
+        g_serviceStatus.dwWaitHint = waitHint;
+
+        if (state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING) {
+            g_serviceStatus.dwControlsAccepted = 0;
+            g_serviceStatus.dwCheckPoint = g_checkpoint++;
+        }
+        else {
+            g_serviceStatus.dwControlsAccepted =
+                state == SERVICE_RUNNING
+                ? SERVICE_ACCEPT_STOP |
+                SERVICE_ACCEPT_SHUTDOWN |
+                SERVICE_ACCEPT_SESSIONCHANGE
+                : 0;
+
+            g_serviceStatus.dwCheckPoint = 0;
+        }
+
+        if (g_serviceStatusHandle != nullptr) {
+            SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+        }
     }
-}
 
-std::wstring GetModuleDirectory() {
-    std::wstring path(MAX_PATH, L'\0');
-    DWORD length = 0;
+    std::wstring GetModuleDirectory() {
+        std::wstring path(MAX_PATH, L'\0');
+        DWORD length = 0;
 
-    for (;;) {
-        length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-        if (length == 0) {
+        for (;;) {
+            length = GetModuleFileNameW(
+                nullptr,
+                path.data(),
+                static_cast<DWORD>(path.size()));
+
+            if (length == 0) {
+                return L".";
+            }
+
+            if (length < path.size() - 1) {
+                path.resize(length);
+                break;
+            }
+
+            path.resize(path.size() * 2);
+        }
+
+        const size_t slash = path.find_last_of(L"\\/");
+
+        if (slash == std::wstring::npos) {
             return L".";
         }
-        if (length < path.size() - 1) {
-            path.resize(length);
-            break;
+
+        path.resize(slash);
+        return path;
+    }
+
+    std::wstring GetTrayExecutablePath() {
+        std::wstring directory = GetModuleDirectory();
+
+        if (!directory.empty() &&
+            directory.back() != L'\\' &&
+            directory.back() != L'/') {
+            directory += L'\\';
         }
-        path.resize(path.size() * 2);
+
+        return directory + kTrayExecutableName;
     }
 
-    const size_t slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) {
-        return L".";
-    }
-    path.resize(slash);
-    return path;
-}
+    void PruneExitedProcessesLocked() {
+        auto iterator = g_processes.begin();
 
-std::wstring GetTrayExecutablePath() {
-    std::wstring directory = GetModuleDirectory();
-    if (!directory.empty() && directory.back() != L'\\' && directory.back() != L'/') {
-        directory += L'\\';
-    }
-    return directory + kTrayExecutableName;
-}
+        while (iterator != g_processes.end()) {
+            const DWORD waitResult = WaitForSingleObject(iterator->process, 0);
 
-void PruneExitedProcessesLocked() {
-    auto iterator = g_processes.begin();
-    while (iterator != g_processes.end()) {
-        const DWORD waitResult = WaitForSingleObject(iterator->process, 0);
-        if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_FAILED) {
-            CloseHandle(iterator->process);
-            iterator = g_processes.erase(iterator);
-        } else {
-            ++iterator;
-        }
-    }
-}
-
-bool HasProcessForSessionLocked(DWORD sessionId) {
-    return std::any_of(
-        g_processes.begin(),
-        g_processes.end(),
-        [sessionId](const LaunchedProcess& process) {
-            return process.sessionId == sessionId &&
-                   WaitForSingleObject(process.process, 0) == WAIT_TIMEOUT;
-        });
-}
-
-bool LaunchTrayForSession(DWORD sessionId) {
-    if (sessionId == 0) {
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_processesMutex);
-        PruneExitedProcessesLocked();
-        if (HasProcessForSessionLocked(sessionId)) {
-            return true;
+            if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_FAILED) {
+                CloseHandle(iterator->process);
+                iterator = g_processes.erase(iterator);
+            }
+            else {
+                ++iterator;
+            }
         }
     }
 
-    ScopedHandle userToken;
-    if (!WTSQueryUserToken(sessionId, userToken.put())) {
-        return false;
+    bool HasProcessForSessionLocked(DWORD sessionId) {
+        return std::any_of(
+            g_processes.begin(),
+            g_processes.end(),
+            [sessionId](const LaunchedProcess& process) {
+                return process.sessionId == sessionId &&
+                    WaitForSingleObject(process.process, 0) == WAIT_TIMEOUT;
+            });
     }
 
-    ScopedHandle primaryToken;
-    if (!DuplicateTokenEx(
+    bool LaunchTrayForSession(DWORD sessionId) {
+        if (sessionId == 0) {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_processesMutex);
+            PruneExitedProcessesLocked();
+
+            if (HasProcessForSessionLocked(sessionId)) {
+                return true;
+            }
+        }
+
+        ScopedHandle userToken;
+
+        if (!WTSQueryUserToken(sessionId, userToken.put())) {
+            return false;
+        }
+
+        ScopedHandle primaryToken;
+
+        if (!DuplicateTokenEx(
             userToken.get(),
             MAXIMUM_ALLOWED,
             nullptr,
             SecurityIdentification,
             TokenPrimary,
             primaryToken.put())) {
-        WriteEventLog(
-            EVENTLOG_WARNING_TYPE,
-            L"DuplicateTokenEx failed: " + GetLastErrorMessage(GetLastError()));
-        return false;
-    }
+            WriteEventLog(
+                EVENTLOG_WARNING_TYPE,
+                L"DuplicateTokenEx failed: " + GetLastErrorMessage(GetLastError()));
 
-    LPVOID environment = nullptr;
-    DWORD creationFlags = 0;
-    if (CreateEnvironmentBlock(&environment, primaryToken.get(), FALSE)) {
-        creationFlags |= CREATE_UNICODE_ENVIRONMENT;
-    }
-
-    const std::wstring trayPath = GetTrayExecutablePath();
-    const std::wstring workingDirectory = GetModuleDirectory();
-    std::wstring commandLine = L"\"" + trayPath + L"\" --background";
-
-    STARTUPINFOW startupInfo{};
-    startupInfo.cb = sizeof(startupInfo);
-    startupInfo.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
-
-    PROCESS_INFORMATION processInfo{};
-    const BOOL created = CreateProcessAsUserW(
-        primaryToken.get(),
-        trayPath.c_str(),
-        commandLine.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        creationFlags,
-        environment,
-        workingDirectory.c_str(),
-        &startupInfo,
-        &processInfo);
-
-    if (environment != nullptr) {
-        DestroyEnvironmentBlock(environment);
-    }
-
-    if (!created) {
-        WriteEventLog(
-            EVENTLOG_WARNING_TYPE,
-            L"CreateProcessAsUserW failed: " + GetLastErrorMessage(GetLastError()));
-        return false;
-    }
-
-    CloseHandle(processInfo.hThread);
-    {
-        std::lock_guard<std::mutex> lock(g_processesMutex);
-        g_processes.push_back({sessionId, processInfo.dwProcessId, processInfo.hProcess});
-    }
-    return true;
-}
-
-void LaunchTrayForAllSessions() {
-    WTS_SESSION_INFOW* sessions = nullptr;
-    DWORD sessionCount = 0;
-    if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &sessionCount)) {
-        WriteEventLog(
-            EVENTLOG_WARNING_TYPE,
-            L"WTSEnumerateSessionsW failed: " + GetLastErrorMessage(GetLastError()));
-        return;
-    }
-
-    for (DWORD index = 0; index < sessionCount; ++index) {
-        if (sessions[index].SessionId != 0) {
-            LaunchTrayForSession(sessions[index].SessionId);
+            return false;
         }
-    }
 
-    WTSFreeMemory(sessions);
-}
+        LPVOID environment = nullptr;
+        DWORD creationFlags = 0;
 
-void TerminateLaunchedProcesses() {
-    std::vector<LaunchedProcess> processes;
-    {
-        std::lock_guard<std::mutex> lock(g_processesMutex);
-        processes.swap(g_processes);
-    }
-
-    for (const LaunchedProcess& process : processes) {
-        if (WaitForSingleObject(process.process, 1500) == WAIT_TIMEOUT) {
-            TerminateProcess(process.process, 0);
-            WaitForSingleObject(process.process, 5000);
+        if (CreateEnvironmentBlock(&environment, primaryToken.get(), FALSE)) {
+            creationFlags |= CREATE_UNICODE_ENVIRONMENT;
         }
-        CloseHandle(process.process);
+
+        const std::wstring trayPath = GetTrayExecutablePath();
+        const std::wstring workingDirectory = GetModuleDirectory();
+
+        std::wstring commandLine = L"\"" + trayPath + L"\" --background";
+
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        startupInfo.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+
+        PROCESS_INFORMATION processInfo{};
+
+        const BOOL created = CreateProcessAsUserW(
+            primaryToken.get(),
+            trayPath.c_str(),
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            creationFlags,
+            environment,
+            workingDirectory.c_str(),
+            &startupInfo,
+            &processInfo);
+
+        if (environment != nullptr) {
+            DestroyEnvironmentBlock(environment);
+        }
+
+        if (!created) {
+            WriteEventLog(
+                EVENTLOG_WARNING_TYPE,
+                L"CreateProcessAsUserW failed: " + GetLastErrorMessage(GetLastError()));
+
+            return false;
+        }
+
+        CloseHandle(processInfo.hThread);
+
+        {
+            std::lock_guard<std::mutex> lock(g_processesMutex);
+
+            g_processes.push_back({
+                sessionId,
+                processInfo.dwProcessId,
+                processInfo.hProcess,
+                });
+        }
+
+        return true;
     }
-}
 
-RPC_STATUS StartRpcServer() {
-    RPC_STATUS status = RpcServerUseProtseqEpW(
-        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcProtocolSequence)),
-        RPC_C_PROTSEQ_MAX_REQS_DEFAULT,
-        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcEndpoint)),
-        nullptr);
-    if (status != RPC_S_OK) {
-        return status;
-    }
+    void LaunchTrayForAllSessions() {
+        WTS_SESSION_INFOW* sessions = nullptr;
+        DWORD sessionCount = 0;
 
-    status = RpcServerRegisterIf2(
-        PracServiceRpc_v1_0_s_ifspec,
-        nullptr,
-        nullptr,
-        RPC_IF_ALLOW_LOCAL_ONLY,
-        RPC_C_LISTEN_MAX_CALLS_DEFAULT,
-        static_cast<unsigned>(-1),
-        nullptr);
-    if (status != RPC_S_OK) {
-        return status;
-    }
+        if (!WTSEnumerateSessionsW(
+            WTS_CURRENT_SERVER_HANDLE,
+            0,
+            1,
+            &sessions,
+            &sessionCount)) {
+            WriteEventLog(
+                EVENTLOG_WARNING_TYPE,
+                L"WTSEnumerateSessionsW failed: " + GetLastErrorMessage(GetLastError()));
 
-    return RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, TRUE);
-}
+            return;
+        }
 
-void StopRpcServer() {
-    RpcMgmtStopServerListening(nullptr);
-    RpcServerUnregisterIf(PracServiceRpc_v1_0_s_ifspec, nullptr, TRUE);
-}
-
-DWORD WINAPI ServiceControlHandler(
-    DWORD control,
-    DWORD eventType,
-    LPVOID eventData,
-    LPVOID) {
-    if (control == SERVICE_CONTROL_INTERROGATE) {
-        SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
-        return NO_ERROR;
-    }
-
-    if (control == SERVICE_CONTROL_SESSIONCHANGE) {
-        if (eventType == WTS_SESSION_LOGON ||
-            eventType == WTS_CONSOLE_CONNECT ||
-            eventType == WTS_REMOTE_CONNECT ||
-            eventType == WTS_SESSION_UNLOCK) {
-            const auto* notification =
-                static_cast<const WTSSESSION_NOTIFICATION*>(eventData);
-            if (notification != nullptr) {
-                LaunchTrayForSession(notification->dwSessionId);
+        for (DWORD index = 0; index < sessionCount; ++index) {
+            if (sessions[index].SessionId != 0) {
+                LaunchTrayForSession(sessions[index].SessionId);
             }
         }
-        return NO_ERROR;
+
+        WTSFreeMemory(sessions);
     }
 
-    return ERROR_CALL_NOT_IMPLEMENTED;
-}
+    void TerminateLaunchedProcesses() {
+        std::vector<LaunchedProcess> processes;
 
-void WINAPI ServiceMain(DWORD, LPWSTR*) {
-    g_serviceStatusHandle = RegisterServiceCtrlHandlerExW(
-        kServiceName,
-        ServiceControlHandler,
-        nullptr);
-    if (g_serviceStatusHandle == nullptr) {
-        return;
+        {
+            std::lock_guard<std::mutex> lock(g_processesMutex);
+            processes.swap(g_processes);
+        }
+
+        for (const LaunchedProcess& process : processes) {
+            if (WaitForSingleObject(process.process, 1500) == WAIT_TIMEOUT) {
+                TerminateProcess(process.process, 0);
+                WaitForSingleObject(process.process, 5000);
+            }
+
+            CloseHandle(process.process);
+        }
     }
 
-    SetServiceState(SERVICE_START_PENDING, NO_ERROR, 30000);
+    DWORD WINAPI ServiceControlHandler(
+        DWORD control,
+        DWORD eventType,
+        LPVOID eventData,
+        LPVOID) {
+        if (control == SERVICE_CONTROL_INTERROGATE) {
+            SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+            return NO_ERROR;
+        }
 
-    g_rpcStoppedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (g_rpcStoppedEvent == nullptr) {
-        SetServiceState(SERVICE_STOPPED, GetLastError());
-        return;
+        if (control == SERVICE_CONTROL_STOP ||
+            control == SERVICE_CONTROL_SHUTDOWN) {
+            SetServiceState(SERVICE_STOP_PENDING, NO_ERROR, 30000);
+
+            if (g_stopEvent != nullptr) {
+                SetEvent(g_stopEvent);
+            }
+
+            return NO_ERROR;
+        }
+
+        if (control == SERVICE_CONTROL_SESSIONCHANGE) {
+            if (eventType == WTS_SESSION_LOGON ||
+                eventType == WTS_CONSOLE_CONNECT ||
+                eventType == WTS_REMOTE_CONNECT ||
+                eventType == WTS_SESSION_UNLOCK) {
+                const auto* notification =
+                    static_cast<WTSSESSION_NOTIFICATION*>(eventData);
+
+                if (notification != nullptr) {
+                    LaunchTrayForSession(notification->dwSessionId);
+                }
+            }
+
+            return NO_ERROR;
+        }
+
+        return ERROR_CALL_NOT_IMPLEMENTED;
     }
 
-    const RPC_STATUS rpcStatus = StartRpcServer();
-    if (rpcStatus != RPC_S_OK) {
-        WriteEventLog(
-            EVENTLOG_ERROR_TYPE,
-            L"RPC server failed to start. RPC status: " + std::to_wstring(rpcStatus));
-        CloseHandle(g_rpcStoppedEvent);
-        g_rpcStoppedEvent = nullptr;
-        SetServiceState(SERVICE_STOPPED, rpcStatus);
-        return;
+    void WINAPI ServiceMain(DWORD, LPWSTR*) {
+        g_serviceStatusHandle = RegisterServiceCtrlHandlerExW(
+            kServiceName,
+            ServiceControlHandler,
+            nullptr);
+
+        if (g_serviceStatusHandle == nullptr) {
+            return;
+        }
+
+        SetServiceState(SERVICE_START_PENDING, NO_ERROR, 30000);
+
+        g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+        if (g_stopEvent == nullptr) {
+            SetServiceState(SERVICE_STOPPED, GetLastError());
+            return;
+        }
+
+        SetServiceState(SERVICE_RUNNING);
+
+        LaunchTrayForAllSessions();
+
+        WaitForSingleObject(g_stopEvent, INFINITE);
+
+        SetServiceState(SERVICE_STOP_PENDING, NO_ERROR, 30000);
+
+        TerminateLaunchedProcesses();
+
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+
+        SetServiceState(SERVICE_STOPPED);
     }
 
-    SetServiceState(SERVICE_RUNNING);
-    LaunchTrayForAllSessions();
-
-    WaitForSingleObject(g_rpcStoppedEvent, INFINITE);
-
-    SetServiceState(SERVICE_STOP_PENDING, NO_ERROR, 30000);
-    StopRpcServer();
-    TerminateLaunchedProcesses();
-
-    CloseHandle(g_rpcStoppedEvent);
-    g_rpcStoppedEvent = nullptr;
-    SetServiceState(SERVICE_STOPPED);
-}
-
-}  // namespace
-
-extern "C" void StopPracService() {
-    if (g_rpcStoppedEvent != nullptr) {
-        SetEvent(g_rpcStoppedEvent);
-    }
-}
+} // namespace
 
 int wmain() {
     SERVICE_TABLE_ENTRYW serviceTable[] = {
