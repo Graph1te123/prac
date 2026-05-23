@@ -52,8 +52,7 @@ endif()
 add_custom_command(
     OUTPUT "${RPC_HEADER}" "${RPC_CLIENT_SOURCE}" "${RPC_SERVER_SOURCE}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${GENERATED_RPC_DIR}"
-    COMMAND "${MIDL_EXECUTABLE}" /nologo /app_config
-            /env ${MIDL_ENVIRONMENT} /char signed
+    COMMAND "${MIDL_EXECUTABLE}" /nologo /env ${MIDL_ENVIRONMENT} /char signed
             /out "${GENERATED_RPC_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}/rpc/prac_service.idl"
     MAIN_DEPENDENCY "${CMAKE_CURRENT_SOURCE_DIR}/rpc/prac_service.idl"
