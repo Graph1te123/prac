@@ -75,11 +75,11 @@ set_source_files_properties(
         LANGUAGE C
 )
 
-add_library(prac-rpc-client OBJECT
+add_library(prac-rpc-client STATIC
     "${RPC_CLIENT_SOURCE}"
 )
 
-add_library(prac-rpc-server OBJECT
+add_library(prac-rpc-server STATIC
     "${RPC_SERVER_SOURCE}"
 )
 
@@ -106,7 +106,6 @@ target_compile_definitions(prac-rpc-server PRIVATE
 add_executable(prac-tray WIN32
     src/main.cpp
     src/rpc_memory.cpp
-    $<TARGET_OBJECTS:prac-rpc-client>
 )
 
 target_compile_features(prac-tray PRIVATE cxx_std_17)
@@ -124,6 +123,7 @@ target_compile_definitions(prac-tray PRIVATE
 )
 
 target_link_libraries(prac-tray PRIVATE
+    prac-rpc-client
     advapi32
     rpcrt4
     shell32
@@ -133,7 +133,6 @@ target_link_libraries(prac-tray PRIVATE
 add_executable(prac-service
     src/service.cpp
     src/rpc_memory.cpp
-    $<TARGET_OBJECTS:prac-rpc-server>
 )
 
 target_compile_features(prac-service PRIVATE cxx_std_17)
@@ -151,6 +150,7 @@ target_compile_definitions(prac-service PRIVATE
 )
 
 target_link_libraries(prac-service PRIVATE
+    prac-rpc-server
     advapi32
     rpcrt4
     userenv
