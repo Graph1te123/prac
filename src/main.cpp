@@ -1,9 +1,15 @@
 #include <windows.h>
+#include <rpc.h>
 #include <shellapi.h>
 #include <sddl.h>
 #include <strsafe.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
 #include <string>
+
+#include "constants.h"
+#include "prac_service.h"
 
 namespace {
 
@@ -27,6 +33,36 @@ UINT g_taskbarCreatedMessage = 0;
 HANDLE g_singleInstanceMutex = nullptr;
 bool g_isExiting = false;
 
+enum class StartupDecision {
+    Continue,
+    ExitSuccess,
+    ExitFailure,
+};
+
+struct ScopedServiceHandle {
+    SC_HANDLE value = nullptr;
+
+    ScopedServiceHandle() = default;
+    explicit ScopedServiceHandle(SC_HANDLE handle) : value(handle) {}
+    ScopedServiceHandle(const ScopedServiceHandle&) = delete;
+    ScopedServiceHandle& operator=(const ScopedServiceHandle&) = delete;
+
+    ~ScopedServiceHandle() {
+        reset();
+    }
+
+    SC_HANDLE get() const {
+        return value;
+    }
+
+    void reset(SC_HANDLE handle = nullptr) {
+        if (value != nullptr) {
+            CloseServiceHandle(value);
+        }
+        value = handle;
+    }
+};
+
 void ShowLastErrorMessage(const wchar_t* title) {
     const DWORD error = GetLastError();
     if (error == ERROR_SUCCESS) {
@@ -48,6 +84,185 @@ void ShowLastErrorMessage(const wchar_t* title) {
         MessageBoxW(nullptr, message, title, MB_ICONERROR | MB_OK);
         LocalFree(message);
     }
+}
+
+bool QueryServiceStatusProcess(SC_HANDLE service, SERVICE_STATUS_PROCESS& status) {
+    DWORD bytesNeeded = 0;
+    return QueryServiceStatusEx(
+               service,
+               SC_STATUS_PROCESS_INFO,
+               reinterpret_cast<LPBYTE>(&status),
+               sizeof(status),
+               &bytesNeeded) != FALSE;
+}
+
+bool WaitForServiceState(SC_HANDLE service, DWORD desiredState, DWORD timeoutMs) {
+    const DWORD startTick = GetTickCount();
+
+    for (;;) {
+        SERVICE_STATUS_PROCESS status{};
+        if (!QueryServiceStatusProcess(service, status)) {
+            return false;
+        }
+
+        if (status.dwCurrentState == desiredState) {
+            return true;
+        }
+
+        if (status.dwCurrentState == SERVICE_STOPPED && desiredState != SERVICE_STOPPED) {
+            SetLastError(status.dwWin32ExitCode);
+            return false;
+        }
+
+        if (GetTickCount() - startTick >= timeoutMs) {
+            SetLastError(ERROR_TIMEOUT);
+            return false;
+        }
+
+        DWORD waitTime = status.dwWaitHint / 10;
+        waitTime = std::max<DWORD>(250, std::min<DWORD>(waitTime, 1000));
+        Sleep(waitTime);
+    }
+}
+
+StartupDecision EnsureServiceIsRunning() {
+    ScopedServiceHandle serviceManager(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    if (serviceManager.get() == nullptr) {
+        ShowLastErrorMessage(L"Open service manager failed");
+        return StartupDecision::ExitFailure;
+    }
+
+    ScopedServiceHandle service(OpenServiceW(
+        serviceManager.get(),
+        kServiceName,
+        SERVICE_QUERY_STATUS | SERVICE_START));
+    if (service.get() == nullptr) {
+        ShowLastErrorMessage(L"Open service failed");
+        return StartupDecision::ExitFailure;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    if (!QueryServiceStatusProcess(service.get(), status)) {
+        ShowLastErrorMessage(L"Query service status failed");
+        return StartupDecision::ExitFailure;
+    }
+
+    if (status.dwCurrentState == SERVICE_RUNNING) {
+        return StartupDecision::Continue;
+    }
+
+    if (status.dwCurrentState == SERVICE_STOPPED) {
+        if (!StartServiceW(service.get(), 0, nullptr) &&
+            GetLastError() != ERROR_SERVICE_ALREADY_RUNNING) {
+            ShowLastErrorMessage(L"Start service failed");
+            return StartupDecision::ExitFailure;
+        }
+    }
+
+    if (!WaitForServiceState(service.get(), SERVICE_RUNNING, 30000)) {
+        ShowLastErrorMessage(L"Wait for service failed");
+        return StartupDecision::ExitFailure;
+    }
+
+    return StartupDecision::ExitSuccess;
+}
+
+bool QueryServiceProcessId(DWORD& processId) {
+    ScopedServiceHandle serviceManager(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    if (serviceManager.get() == nullptr) {
+        return false;
+    }
+
+    ScopedServiceHandle service(OpenServiceW(
+        serviceManager.get(),
+        kServiceName,
+        SERVICE_QUERY_STATUS));
+    if (service.get() == nullptr) {
+        return false;
+    }
+
+    SERVICE_STATUS_PROCESS status{};
+    if (!QueryServiceStatusProcess(service.get(), status) ||
+        status.dwCurrentState != SERVICE_RUNNING ||
+        status.dwProcessId == 0) {
+        return false;
+    }
+
+    processId = status.dwProcessId;
+    return true;
+}
+
+DWORD GetParentProcessId(DWORD processId) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+
+    PROCESSENTRY32W processEntry{};
+    processEntry.dwSize = sizeof(processEntry);
+
+    DWORD parentProcessId = 0;
+    if (Process32FirstW(snapshot, &processEntry)) {
+        do {
+            if (processEntry.th32ProcessID == processId) {
+                parentProcessId = processEntry.th32ParentProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &processEntry));
+    }
+
+    CloseHandle(snapshot);
+    return parentProcessId;
+}
+
+bool IsStartedByService() {
+    DWORD serviceProcessId = 0;
+    if (!QueryServiceProcessId(serviceProcessId)) {
+        return false;
+    }
+
+    return GetParentProcessId(GetCurrentProcessId()) == serviceProcessId;
+}
+
+bool StopServiceViaRpc() {
+    RPC_WSTR stringBinding = nullptr;
+    RPC_STATUS status = RpcStringBindingComposeW(
+        nullptr,
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcProtocolSequence)),
+        nullptr,
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcEndpoint)),
+        nullptr,
+        &stringBinding);
+    if (status != RPC_S_OK) {
+        SetLastError(status);
+        return false;
+    }
+
+    status = RpcBindingFromStringBindingW(stringBinding, &PracServiceRpcBinding);
+    RpcStringFreeW(&stringBinding);
+    if (status != RPC_S_OK) {
+        SetLastError(status);
+        return false;
+    }
+
+    RpcTryExcept {
+        StopPracService();
+        status = RPC_S_OK;
+    }
+    RpcExcept(1) {
+        status = RpcExceptionCode();
+    }
+    RpcEndExcept
+
+    RpcBindingFree(&PracServiceRpcBinding);
+    PracServiceRpcBinding = nullptr;
+
+    if (status != RPC_S_OK) {
+        SetLastError(status);
+        return false;
+    }
+
+    return true;
 }
 
 std::wstring GetCurrentUserSidString() {
@@ -164,6 +379,9 @@ void ShowMainWindow(HWND window) {
 }
 
 void ExitApplication(HWND window) {
+    if (!StopServiceViaRpc()) {
+        ShowLastErrorMessage(L"Stop service failed");
+    }
     g_isExiting = true;
     DestroyWindow(window);
 }
@@ -329,6 +547,18 @@ HWND CreateMainWindow() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     g_instance = instance;
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+
+    const StartupDecision serviceDecision = EnsureServiceIsRunning();
+    if (serviceDecision == StartupDecision::ExitSuccess) {
+        return 0;
+    }
+    if (serviceDecision == StartupDecision::ExitFailure) {
+        return 1;
+    }
+
+    if (!IsStartedByService()) {
+        return 0;
+    }
 
     if (!EnsureSingleInstance()) {
         return 0;

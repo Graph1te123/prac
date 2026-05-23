@@ -25,5 +25,5 @@ jobs:
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: prac-tray-windows-x64
+          name: prac-task2-windows-x64
           path: dist
