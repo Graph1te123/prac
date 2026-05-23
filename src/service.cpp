@@ -381,7 +381,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
 
 }  // namespace
 
-extern "C" void StopPracService(handle_t) {
+extern "C" void StopPracService() {
     if (g_rpcStoppedEvent != nullptr) {
         SetEvent(g_rpcStoppedEvent);
     }

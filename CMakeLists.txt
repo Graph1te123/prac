@@ -92,14 +92,10 @@ target_include_directories(prac-rpc-server PRIVATE
 )
 
 target_compile_definitions(prac-rpc-client PRIVATE
-    UNICODE
-    _UNICODE
     WIN32_LEAN_AND_MEAN
 )
 
 target_compile_definitions(prac-rpc-server PRIVATE
-    UNICODE
-    _UNICODE
     WIN32_LEAN_AND_MEAN
 )
 
