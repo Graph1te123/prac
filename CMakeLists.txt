@@ -7,6 +7,7 @@ if(NOT WIN32)
 endif()
 
 set(GENERATED_RPC_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 set(RPC_HEADER "${GENERATED_RPC_DIR}/prac_service.h")
 set(RPC_CLIENT_SOURCE "${GENERATED_RPC_DIR}/prac_service_c.c")
 set(RPC_SERVER_SOURCE "${GENERATED_RPC_DIR}/prac_service_s.c")
@@ -29,16 +30,20 @@ if(NOT MIDL_EXECUTABLE)
         "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]"
         ABSOLUTE
     )
+
     file(GLOB WINDOWS_SDK_BIN_DIRS LIST_DIRECTORIES true
         "${WINDOWS_KITS_ROOT}/bin/10.*"
     )
+
     list(SORT WINDOWS_SDK_BIN_DIRS COMPARE NATURAL ORDER DESCENDING)
+
     foreach(SDK_BIN_DIR IN LISTS WINDOWS_SDK_BIN_DIRS)
         find_program(MIDL_EXECUTABLE
             NAMES midl midl.exe
             PATHS "${SDK_BIN_DIR}/x64" "${SDK_BIN_DIR}/x86"
             NO_DEFAULT_PATH
         )
+
         if(MIDL_EXECUTABLE)
             break()
         endif()
@@ -59,23 +64,40 @@ add_custom_command(
     VERBATIM
 )
 
+set_source_files_properties(
+    "${RPC_CLIENT_SOURCE}"
+    "${RPC_SERVER_SOURCE}"
+    PROPERTIES
+        GENERATED TRUE
+        LANGUAGE C
+)
+
+add_custom_target(generate_rpc
+    DEPENDS "${RPC_HEADER}" "${RPC_CLIENT_SOURCE}" "${RPC_SERVER_SOURCE}"
+)
+
 add_executable(prac-tray WIN32
     src/main.cpp
     src/rpc_memory.cpp
     "${RPC_CLIENT_SOURCE}"
 )
 
+add_dependencies(prac-tray generate_rpc)
+
 target_compile_features(prac-tray PRIVATE cxx_std_17)
+
 target_include_directories(prac-tray PRIVATE
     src
     "${GENERATED_RPC_DIR}"
 )
+
 target_compile_definitions(prac-tray PRIVATE
     UNICODE
     _UNICODE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
+
 target_link_libraries(prac-tray PRIVATE
     advapi32
     rpcrt4
@@ -89,17 +111,22 @@ add_executable(prac-service
     "${RPC_SERVER_SOURCE}"
 )
 
+add_dependencies(prac-service generate_rpc)
+
 target_compile_features(prac-service PRIVATE cxx_std_17)
+
 target_include_directories(prac-service PRIVATE
     src
     "${GENERATED_RPC_DIR}"
 )
+
 target_compile_definitions(prac-service PRIVATE
     UNICODE
     _UNICODE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
+
 target_link_libraries(prac-service PRIVATE
     advapi32
     rpcrt4
