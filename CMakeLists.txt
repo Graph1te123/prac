@@ -6,6 +6,9 @@ if(NOT WIN32)
     message(FATAL_ERROR "This project targets Windows only.")
 endif()
 
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
 set(GENERATED_RPC_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 set(RPC_HEADER "${GENERATED_RPC_DIR}/prac_service.h")
@@ -72,17 +75,39 @@ set_source_files_properties(
         LANGUAGE C
 )
 
-add_custom_target(generate_rpc
-    DEPENDS "${RPC_HEADER}" "${RPC_CLIENT_SOURCE}" "${RPC_SERVER_SOURCE}"
+add_library(prac-rpc-client OBJECT
+    "${RPC_CLIENT_SOURCE}"
+)
+
+add_library(prac-rpc-server OBJECT
+    "${RPC_SERVER_SOURCE}"
+)
+
+target_include_directories(prac-rpc-client PRIVATE
+    "${GENERATED_RPC_DIR}"
+)
+
+target_include_directories(prac-rpc-server PRIVATE
+    "${GENERATED_RPC_DIR}"
+)
+
+target_compile_definitions(prac-rpc-client PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
+)
+
+target_compile_definitions(prac-rpc-server PRIVATE
+    UNICODE
+    _UNICODE
+    WIN32_LEAN_AND_MEAN
 )
 
 add_executable(prac-tray WIN32
     src/main.cpp
     src/rpc_memory.cpp
-    "${RPC_CLIENT_SOURCE}"
+    $<TARGET_OBJECTS:prac-rpc-client>
 )
-
-add_dependencies(prac-tray generate_rpc)
 
 target_compile_features(prac-tray PRIVATE cxx_std_17)
 
@@ -108,10 +133,8 @@ target_link_libraries(prac-tray PRIVATE
 add_executable(prac-service
     src/service.cpp
     src/rpc_memory.cpp
-    "${RPC_SERVER_SOURCE}"
+    $<TARGET_OBJECTS:prac-rpc-server>
 )
-
-add_dependencies(prac-service generate_rpc)
 
 target_compile_features(prac-service PRIVATE cxx_std_17)
 
